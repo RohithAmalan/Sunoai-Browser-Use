@@ -1,0 +1,13 @@
+{
+  "name": "suno-automation",
+  "version": "1.0.0",
+  "description": "Browser automation for Suno AI song generation",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  },
+  "type": "module"
+}
