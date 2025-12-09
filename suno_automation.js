@@ -133,34 +133,32 @@ export class SunoBot {
 
         console.log('Clicking Create button...');
         try {
-            // Wait for the button to be potentially enabled
-            await this.page.waitForTimeout(1000);
+            // Strategy 1: The "Create" button at the bottom of the form
+            // It often has a specific class or ID, but text is best.
+            // We'll try specific role first.
+            const createBtn = this.page.getByRole('button', { name: /^Create$/i }).first();
 
-            // Try to find the specific yellow/primary create button.
-            // We use a broad text match restricted to visible buttons.
-            const createBtn = this.page.locator('button')
-                .filter({ hasText: /Create|Generate/i })
-                .filter({ hasNotText: /Custom/i }) // Avoid "Custom Mode" toggle if exists
-                .locator('visible=true')
-                .last(); // Usually the main action is at the bottom or later in DOM
-
-            await createBtn.waitFor({ state: 'visible', timeout: 5000 });
-
-            // Check if it's disabled (e.g. empty prompt)
-            if (await createBtn.isDisabled()) {
-                console.log('Create button is disabled. Checking prompt...');
-                // Maybe prompt didn't stick?
-                await promptInput.press('Space');
-                await promptInput.press('Backspace');
-                await this.page.waitForTimeout(500);
+            if (await createBtn.isVisible()) {
+                await createBtn.click();
+            } else {
+                throw new Error('Role button not found');
             }
 
-            await createBtn.click();
-
         } catch (e) {
-            console.log('Primary Create button click failed, searching generic buttons...');
-            // Fallback: Click any visible button that says "Create" exactly
-            await this.page.locator('button:text-is("Create"):visible').click();
+            console.log('Primary button strategy failed. Trying alternatives...');
+            try {
+                // Strategy 2: Click the visible text "Create" that acts as a button
+                // This catches divs/spans with onClick handlers
+                const createText = this.page.locator(':text-matches("^Create$", "i")')
+                    .locator('visible=true')
+                    .last(); // Often the last one is the main action
+                await createText.click({ timeout: 3000 });
+            } catch (e2) {
+                console.log('Text click failed. Trying Enter key in prompt...');
+                // Strategy 3: Press Enter in the prompt textarea (often submits)
+                const promptSelector = 'textarea:visible';
+                await this.page.locator(promptSelector).first().press('Enter');
+            }
         }
 
         console.log('Create clicked. Waiting for generation to start...');
