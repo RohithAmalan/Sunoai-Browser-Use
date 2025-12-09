@@ -176,25 +176,18 @@ export class SunoBot {
             let audioSrc = null;
             let title = 'generated_song';
 
-            // Poll for up to 5 minutes
-            for (let i = 0; i < 60; i++) {
+            // Poll for up to 5 minutes (300s), but check every 2 seconds
+            const maxRetries = 150;
+            for (let i = 0; i < maxRetries; i++) {
                 // Look for audio elements
                 const audios = await this.page.locator('audio').all();
-
-                // Strategy: Find the first audio element that has a valid HTTPS src (not blob/empty).
-                // Suno often initializes with blobs or no src. 
-                // We also want to ensure the "Generating" state is gone.
-                // We'll trust the presence of a valid CDN URL as completion.
 
                 // check for audio source
                 for (const audio of audios) {
                     const src = await audio.getAttribute('src');
-                    // Check for valid CDN url OR blob (if that's what they use now)
-                    // We strongly prefer HTTP but if it's blob and NOT silence, maybe it's the song?
-                    // Suno usually uses CDN for final. 
+                    // Accept blobs or HTTP. 
+                    // We just want SOMETHING that isn't silence.
                     if (src && !src.includes('sil-100')) {
-                        // If it's a blob, it might be the preview? Let's check duration if possible? 
-                        // For now, let's stick to the non-silence check.
                         if (src.includes('http') || src.includes('blob:')) {
                             audioSrc = src;
                             console.log('Found candidate audio source:', src);
@@ -207,28 +200,31 @@ export class SunoBot {
                     break;
                 }
 
-                // If we've waited 15s and still nothing, try to find the "Play" button for the new song and click it.
-                // This forces the audio element to mount/update.
-                if (i === 3) { // 15 seconds in (3 * 5s)
-                    console.log('Attempting to click Play to force audio loading...');
+                // Aggressive Play Strategy:
+                // Every 10 seconds (approx every 5 loops), click the top-most Play button.
+                // This forces the site to fetch the audio if it's stuck in "ready but not loaded" state.
+                if (i % 5 === 0 && i > 0) {
+                    process.stdout.write('.'); // progress indicator
                     try {
-                        // Assuming the first play button corresponds to the new track at the top
-                        // We look for a button with a "Play" icon/label
-                        const playBtn = this.page.locator('button[aria-label="Play"]').first();
+                        // Target the most recent item's play button.
+                        // Ideally checking for "Play" aria-label or specific icon class.
+                        // We use .first() assuming the new song is at the top.
+                        const playBtn = this.page.locator('button[aria-label="Play"], button[title="Play"]').first();
                         if (await playBtn.isVisible()) {
-                            await playBtn.click();
+                            await playBtn.click({ timeout: 1000 }).catch(() => { });
                         }
-                    } catch (e) {
-                        // Ignore click errors
-                    }
+                    } catch (e) { }
                 }
 
-                console.log(`Waiting for generation/audio... (${(i + 1) * 5}s)`);
-                await this.page.waitForTimeout(5000);
+                if (i % 15 === 0) {
+                    console.log(`\nWaiting (${(i * 2)}s)...`);
+                }
+
+                await this.page.waitForTimeout(2000);
             }
 
             if (!audioSrc) {
-                console.log('Timed out waiting for audio URL. Song might still be generating or failed.');
+                console.log('\nTimed out waiting for audio URL. Song might still be generating or failed.');
                 return {
                     timestamp: new Date().toISOString(),
                     prompt: prompt,
@@ -240,7 +236,7 @@ export class SunoBot {
             title = prompt.slice(0, 20).replace(/[^a-z0-9]/gi, '_').toLowerCase();
 
             // Download the file
-            console.log(`Downloading audio from ${audioSrc}...`);
+            console.log(`\nDownloading audio from ${audioSrc}...`);
             const response = await this.context.request.get(audioSrc);
             const buffer = await response.body();
 
