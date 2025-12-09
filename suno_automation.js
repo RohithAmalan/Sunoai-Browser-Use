@@ -133,13 +133,34 @@ export class SunoBot {
 
         console.log('Clicking Create button...');
         try {
-            const createButton = this.page.getByRole('button', { name: /Create|Generate/i }).last();
-            await createButton.waitFor({ state: 'visible', timeout: 5000 });
-            await createButton.click();
+            // Wait for the button to be potentially enabled
+            await this.page.waitForTimeout(1000);
+
+            // Try to find the specific yellow/primary create button.
+            // We use a broad text match restricted to visible buttons.
+            const createBtn = this.page.locator('button')
+                .filter({ hasText: /Create|Generate/i })
+                .filter({ hasNotText: /Custom/i }) // Avoid "Custom Mode" toggle if exists
+                .locator('visible=true')
+                .last(); // Usually the main action is at the bottom or later in DOM
+
+            await createBtn.waitFor({ state: 'visible', timeout: 5000 });
+
+            // Check if it's disabled (e.g. empty prompt)
+            if (await createBtn.isDisabled()) {
+                console.log('Create button is disabled. Checking prompt...');
+                // Maybe prompt didn't stick?
+                await promptInput.press('Space');
+                await promptInput.press('Backspace');
+                await this.page.waitForTimeout(500);
+            }
+
+            await createBtn.click();
+
         } catch (e) {
-            console.log('Could not find generic Create button, trying specific selectors...');
-            // Fallback or specific selector if role lookup fails
-            await this.page.locator('button:has-text("Create")').click();
+            console.log('Primary Create button click failed, searching generic buttons...');
+            // Fallback: Click any visible button that says "Create" exactly
+            await this.page.locator('button:text-is("Create"):visible').click();
         }
 
         console.log('Create clicked. Waiting for generation to start...');
@@ -162,27 +183,33 @@ export class SunoBot {
                 // Look for audio elements
                 const audios = await this.page.locator('audio').all();
 
-                // In Suno, the new song might be the first audio element or we need to find it by the "New" badge or just the top item.
-                // We'll try to find the audio element with a src.
+                // Strategy: Find the first audio element that has a valid HTTPS src (not blob/empty).
+                // Suno often initializes with blobs or no src. 
+                // We also want to ensure the "Generating" state is gone.
+                // We'll trust the presence of a valid CDN URL as completion.
 
                 for (const audio of audios) {
                     const src = await audio.getAttribute('src');
-                    if (src && src.length > 0 && !src.includes('blob:')) {
+                    // Check for valid CDN url (usually cdn1.suno.ai)
+                    // FILTER OUT VALID-LOOKING BUT PLACEHOLDER FILES like "sil-100.mp3" (silence)
+                    if (src && src.includes('http') && !src.includes('blob:') && !src.includes('sil-100')) {
                         audioSrc = src;
-                        console.log('Found audio source!');
+                        console.log('Found valid audio source:', src);
                         break;
                     }
                 }
 
-                if (audioSrc) break;
+                if (audioSrc) {
+                    // Start downloading
+                    break;
+                }
 
-                // If no audio src yet, it might still be generating.
-                console.log(`Still waiting for audio... (${(i + 1) * 5}s)`);
+                console.log(`Waiting for actual audio content... (${(i + 1) * 5}s)`);
                 await this.page.waitForTimeout(5000);
             }
 
             if (!audioSrc) {
-                console.log('Timed out waiting for audio URL. Song might still be generating.');
+                console.log('Timed out waiting for audio URL. Song might still be generating or failed.');
                 return {
                     timestamp: new Date().toISOString(),
                     prompt: prompt,
@@ -198,8 +225,14 @@ export class SunoBot {
             const response = await this.context.request.get(audioSrc);
             const buffer = await response.body();
 
+            // Save to 'downloads' folder
+            const downloadDir = path.join(process.cwd(), 'downloads');
+            if (!fs.existsSync(downloadDir)) {
+                fs.mkdirSync(downloadDir);
+            }
+
             const fileName = `${title}_${Date.now()}.mp3`;
-            const filePath = path.join(process.cwd(), fileName);
+            const filePath = path.join(downloadDir, fileName);
 
             fs.writeFileSync(filePath, buffer);
             console.log(`Audio saved to: ${filePath}`);
@@ -208,7 +241,7 @@ export class SunoBot {
                 timestamp: new Date().toISOString(),
                 prompt: prompt,
                 status: 'Completed',
-                file: fileName
+                file: filePath
             };
 
         } catch (e) {
