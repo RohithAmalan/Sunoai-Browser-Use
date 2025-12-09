@@ -171,92 +171,88 @@ export class SunoBot {
             // Broad selector for the most recent song item (assuming top of list)
             // We look for a "Play" button which indicates a playable track, or "Generating" text.
 
-            console.log('Monitoring generation status (this may take 1-2 minutes)...');
+            // New Strategy: Trigger Download via UI (More Actions -> Download -> Audio)
+            // This is more reliable than scraping src which might remain a blob or loading state.
 
-            let audioSrc = null;
+            console.log('Waiting for generation to finish to trigger download...');
+
+            // Allow some time for generation to actually complete (UI to become interactive)
+            // We loop trying to find the "Download" option.
+            const timeout = 300000; // 5 mins
+            const startTime = Date.now();
+
+            let download = null;
             let title = 'generated_song';
 
-            // Poll for up to 5 minutes (300s), but check every 2 seconds
-            const maxRetries = 150;
-            for (let i = 0; i < maxRetries; i++) {
-                // Look for audio elements
-                const audios = await this.page.locator('audio').all();
+            while (Date.now() - startTime < timeout) {
+                try {
+                    // 1. Find the "More Actions" / "..." button for the MOST RECENT song.
+                    // Usually the first button with aria-label "More" or similar in the list.
+                    // We target the list container to be safe.
 
-                // check for audio source
-                for (const audio of audios) {
-                    const src = await audio.getAttribute('src');
-                    // Accept blobs or HTTP. 
-                    // We just want SOMETHING that isn't silence.
-                    if (src && !src.includes('sil-100')) {
-                        if (src.includes('http') || src.includes('blob:')) {
-                            audioSrc = src;
-                            console.log('Found candidate audio source:', src);
-                            break;
+                    // Specific selector for the "More actions" button.
+                    const moreActionsBtn = this.page.locator('[aria-label="More actions"], button[data-testid="more-actions"]').first();
+
+                    if (await moreActionsBtn.isVisible()) {
+                        await moreActionsBtn.click();
+
+                        // 2. Wait for Menu to appear and looking for "Download"
+                        const downloadMenuItem = this.page.getByText('Download', { exact: true });
+                        if (await downloadMenuItem.isVisible()) {
+                            await downloadMenuItem.hover(); // Hover to reveal sub-menu if necessary
+                            await downloadMenuItem.click();
+
+                            // 3. Click "Audio"
+                            const audioMenuItem = this.page.getByText('Audio', { exact: true });
+                            if (await audioMenuItem.isVisible()) {
+
+                                // Setup download listener BEFORE clicking
+                                const downloadPromise = this.page.waitForEvent('download', { timeout: 10000 });
+                                await audioMenuItem.click();
+                                const downloadEvent = await downloadPromise;
+
+                                // Save the file
+                                const downloadDir = path.join(process.cwd(), 'downloads');
+                                if (!fs.existsSync(downloadDir)) {
+                                    fs.mkdirSync(downloadDir);
+                                }
+
+                                // Clean up title
+                                title = prompt.slice(0, 20).replace(/[^a-z0-9]/gi, '_').toLowerCase();
+                                const fileName = `${title}_${Date.now()}.mp3`;
+                                const filePath = path.join(downloadDir, fileName);
+
+                                await downloadEvent.saveAs(filePath);
+                                console.log(`Audio saved to: ${filePath}`);
+
+                                return {
+                                    timestamp: new Date().toISOString(),
+                                    prompt: prompt,
+                                    status: 'Completed',
+                                    file: filePath
+                                };
+                            }
                         }
+
+                        // If we clicked "More" preventing re-opening, we might need to click away?
+                        // Usually clicking it again or clicking body closes it.
+                        await this.page.keyboard.press('Escape');
                     }
+                } catch (e) {
+                    // Ignore errors during polling (e.g. menu not ready yet)
+                    // console.log('Retrying download flow...');
                 }
 
-                if (audioSrc) {
-                    break;
-                }
-
-                // Aggressive Play Strategy:
-                // Every 10 seconds (approx every 5 loops), click the top-most Play button.
-                // This forces the site to fetch the audio if it's stuck in "ready but not loaded" state.
-                if (i % 5 === 0 && i > 0) {
-                    process.stdout.write('.'); // progress indicator
-                    try {
-                        // Target the most recent item's play button.
-                        // Ideally checking for "Play" aria-label or specific icon class.
-                        // We use .first() assuming the new song is at the top.
-                        const playBtn = this.page.locator('button[aria-label="Play"], button[title="Play"]').first();
-                        if (await playBtn.isVisible()) {
-                            await playBtn.click({ timeout: 1000 }).catch(() => { });
-                        }
-                    } catch (e) { }
-                }
-
-                if (i % 15 === 0) {
-                    console.log(`\nWaiting (${(i * 2)}s)...`);
-                }
-
-                await this.page.waitForTimeout(2000);
+                // Wait before retry
+                console.log(`Waiting for download option... (${Math.floor((Date.now() - startTime) / 1000)}s)`);
+                await this.page.waitForTimeout(5000);
             }
 
-            if (!audioSrc) {
-                console.log('\nTimed out waiting for audio URL. Song might still be generating or failed.');
-                return {
-                    timestamp: new Date().toISOString(),
-                    prompt: prompt,
-                    status: 'Timeout waiting for audio'
-                };
-            }
-
-            // Clean up title
-            title = prompt.slice(0, 20).replace(/[^a-z0-9]/gi, '_').toLowerCase();
-
-            // Download the file
-            console.log(`\nDownloading audio from ${audioSrc}...`);
-            const response = await this.context.request.get(audioSrc);
-            const buffer = await response.body();
-
-            // Save to 'downloads' folder
-            const downloadDir = path.join(process.cwd(), 'downloads');
-            if (!fs.existsSync(downloadDir)) {
-                fs.mkdirSync(downloadDir);
-            }
-
-            const fileName = `${title}_${Date.now()}.mp3`;
-            const filePath = path.join(downloadDir, fileName);
-
-            fs.writeFileSync(filePath, buffer);
-            console.log(`Audio saved to: ${filePath}`);
-
+            console.log('\nTimed out waiting for download option.');
             return {
                 timestamp: new Date().toISOString(),
                 prompt: prompt,
-                status: 'Completed',
-                file: filePath
+                status: 'Timeout waiting for download'
             };
 
         } catch (e) {
