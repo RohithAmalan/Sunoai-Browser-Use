@@ -213,13 +213,20 @@ export class SunoBot {
                         const downloadMenuItem = this.page.getByText('Download', { exact: true });
                         if (await downloadMenuItem.isVisible()) {
                             await downloadMenuItem.hover();
-                            await downloadMenuItem.click();
+                            // Sometimes clicking "Download" itself is needed, sometimes just hover.
+                            // We'll click it to be safe, but catch error if it's just a trigger.
+                            try { await downloadMenuItem.click({ timeout: 1000 }); } catch (e) { }
 
-                            // 3. Click "Audio"
-                            const audioMenuItem = this.page.getByText('Audio', { exact: true });
+                            // 3. Click "MP3 Audio" (Updated based on screenshot)
+                            // Screenshot shows "MP3 Audio" entry.
+                            const audioMenuItem = this.page.getByText('MP3 Audio', { exact: false }).first();
+
+                            // Wait a moment for submenu
+                            await this.page.waitForTimeout(500);
+
                             if (await audioMenuItem.isVisible()) {
 
-                                console.log('Found Download -> Audio option. Clicking...');
+                                console.log('Found Download -> MP3 Audio option. Clicking...');
                                 // Setup download listener BEFORE clicking
                                 const downloadPromise = this.page.waitForEvent('download', { timeout: 30000 });
                                 await audioMenuItem.click();
