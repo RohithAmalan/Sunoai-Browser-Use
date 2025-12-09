@@ -186,23 +186,44 @@ export class SunoBot {
                 // We also want to ensure the "Generating" state is gone.
                 // We'll trust the presence of a valid CDN URL as completion.
 
+                // check for audio source
                 for (const audio of audios) {
                     const src = await audio.getAttribute('src');
-                    // Check for valid CDN url (usually cdn1.suno.ai)
-                    // FILTER OUT VALID-LOOKING BUT PLACEHOLDER FILES like "sil-100.mp3" (silence)
-                    if (src && src.includes('http') && !src.includes('blob:') && !src.includes('sil-100')) {
-                        audioSrc = src;
-                        console.log('Found valid audio source:', src);
-                        break;
+                    // Check for valid CDN url OR blob (if that's what they use now)
+                    // We strongly prefer HTTP but if it's blob and NOT silence, maybe it's the song?
+                    // Suno usually uses CDN for final. 
+                    if (src && !src.includes('sil-100')) {
+                        // If it's a blob, it might be the preview? Let's check duration if possible? 
+                        // For now, let's stick to the non-silence check.
+                        if (src.includes('http') || src.includes('blob:')) {
+                            audioSrc = src;
+                            console.log('Found candidate audio source:', src);
+                            break;
+                        }
                     }
                 }
 
                 if (audioSrc) {
-                    // Start downloading
                     break;
                 }
 
-                console.log(`Waiting for actual audio content... (${(i + 1) * 5}s)`);
+                // If we've waited 15s and still nothing, try to find the "Play" button for the new song and click it.
+                // This forces the audio element to mount/update.
+                if (i === 3) { // 15 seconds in (3 * 5s)
+                    console.log('Attempting to click Play to force audio loading...');
+                    try {
+                        // Assuming the first play button corresponds to the new track at the top
+                        // We look for a button with a "Play" icon/label
+                        const playBtn = this.page.locator('button[aria-label="Play"]').first();
+                        if (await playBtn.isVisible()) {
+                            await playBtn.click();
+                        }
+                    } catch (e) {
+                        // Ignore click errors
+                    }
+                }
+
+                console.log(`Waiting for generation/audio... (${(i + 1) * 5}s)`);
                 await this.page.waitForTimeout(5000);
             }
 
