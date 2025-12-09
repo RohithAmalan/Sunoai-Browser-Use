@@ -186,28 +186,42 @@ export class SunoBot {
 
             while (Date.now() - startTime < timeout) {
                 try {
-                    // 1. Find the "More Actions" / "..." button for the MOST RECENT song.
-                    // Usually the first button with aria-label "More" or similar in the list.
-                    // We target the list container to be safe.
+                    // Refresh page after 1 minute if we haven't found it yet. 
+                    // This often fixes the issue where the "Download" option isn't available immediately.
+                    const elapsed = Date.now() - startTime;
+                    if (elapsed > 60000 && elapsed < 70000 && !download) { // Run once around 60s
+                        console.log('Reloading page to refresh song status...');
+                        await this.page.reload({ waitUntil: 'domcontentloaded' });
+                        await this.page.waitForTimeout(5000); // Wait for hydration
+                    }
 
-                    // Specific selector for the "More actions" button.
-                    const moreActionsBtn = this.page.locator('[aria-label="More actions"], button[data-testid="more-actions"]').first();
+                    // 1. Find the "More Actions" button.
+                    // Try multiple selectors. 
+                    // We specifically look for the *most recent* song's menu.
+                    // Often this is the first "More actions" button in the list.
+                    const moreActionsBtn = this.page.locator('button[aria-label*="More actions"], button[aria-label="More"], button[data-testid="more-actions"]').first();
 
                     if (await moreActionsBtn.isVisible()) {
+                        // Scroll to it/focus it
+                        await moreActionsBtn.focus();
                         await moreActionsBtn.click();
 
                         // 2. Wait for Menu to appear and looking for "Download"
+                        // It might take a moment for the react portal to open
+                        await this.page.waitForTimeout(1000);
+
                         const downloadMenuItem = this.page.getByText('Download', { exact: true });
                         if (await downloadMenuItem.isVisible()) {
-                            await downloadMenuItem.hover(); // Hover to reveal sub-menu if necessary
+                            await downloadMenuItem.hover();
                             await downloadMenuItem.click();
 
                             // 3. Click "Audio"
                             const audioMenuItem = this.page.getByText('Audio', { exact: true });
                             if (await audioMenuItem.isVisible()) {
 
+                                console.log('Found Download -> Audio option. Clicking...');
                                 // Setup download listener BEFORE clicking
-                                const downloadPromise = this.page.waitForEvent('download', { timeout: 10000 });
+                                const downloadPromise = this.page.waitForEvent('download', { timeout: 30000 });
                                 await audioMenuItem.click();
                                 const downloadEvent = await downloadPromise;
 
@@ -234,13 +248,11 @@ export class SunoBot {
                             }
                         }
 
-                        // If we clicked "More" preventing re-opening, we might need to click away?
-                        // Usually clicking it again or clicking body closes it.
+                        // If we opened the menu but couldn't find download/audio, close it to retry
                         await this.page.keyboard.press('Escape');
                     }
                 } catch (e) {
-                    // Ignore errors during polling (e.g. menu not ready yet)
-                    // console.log('Retrying download flow...');
+                    // Ignore transient errors
                 }
 
                 // Wait before retry
