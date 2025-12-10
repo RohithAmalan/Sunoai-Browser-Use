@@ -171,133 +171,107 @@ export class SunoBot {
             // Broad selector for the most recent song item (assuming top of list)
             // We look for a "Play" button which indicates a playable track, or "Generating" text.
 
-            // New Strategy: Trigger Download via UI (More Actions -> Download -> Audio)
-            // This is more reliable than scraping src which might remain a blob or loading state.
+            // NEW STRATEGY: Network Response Interception
+            // Instead of fighting the UI menus, we will listen for the audio file being fetched by the browser.
+            // When we click "Play", the browser requests the MP3/WAV from the CDN. We catch that.
 
-            console.log('Waiting for generation to finish to trigger download...');
+            console.log('Monitoring network traffic for audio files...');
 
-            // Allow some time for generation to actually complete (UI to become interactive)
-            // We loop trying to find the "Download" option.
-            const timeout = 300000; // 5 mins
+            let downloadPromiseResolve;
+            const downloadPromise = new Promise(resolve => downloadPromiseResolve = resolve);
+
+            // Set up listener for MP3/WAV responses
+            const responseHandler = async (response) => {
+                const url = response.url();
+                // Check if it's an audio file from Suno's CDN
+                // Usually cdn1.suno.ai, ending in .mp3 or with audio content-type
+                if ((url.includes('.mp3') || url.includes('.wav')) && !url.includes('sil-100')) {
+                    console.log(`Intercepted audio URL: ${url}`);
+
+                    // Double check content type if needed, but extension is usually safe enough here
+                    try {
+                        const buffer = await response.body();
+                        if (buffer.length > 1000) { // Ensure it's not a tiny error file
+                            downloadPromiseResolve({ buffer, url });
+                        }
+                    } catch (e) {
+                        console.log('Failed to read intercepted buffer:', e.message);
+                    }
+                }
+            };
+
+            this.page.on('response', responseHandler);
+
+            // Trigger Loop: Click Play periodically to force the request
             const startTime = Date.now();
+            const timeout = 300000; // 5 mins
 
-            let download = null;
-            let title = 'generated_song';
+            let capturedAudio = null;
+            let title = 'generated_song'; // Define title here for scope
 
             while (Date.now() - startTime < timeout) {
+                // Check if our promise resolved (we found a file)
+                // We use a race with a small timeout so we can keep looping/clicking
+                const raceResult = await Promise.race([
+                    downloadPromise,
+                    new Promise(r => setTimeout(r, 2000)) // 2s tick
+                ]);
+
+                if (raceResult && raceResult.buffer) {
+                    capturedAudio = raceResult;
+                    break;
+                }
+
+                // If not found yet, try clicking Play on the first item
                 try {
-                    // Check if still generating (optional feedback)
-                    const generatingLabel = this.page.getByText('Generating...', { exact: false }).first();
-                    if (await generatingLabel.isVisible()) {
-                        const elapsed = Math.floor((Date.now() - startTime) / 1000);
-                        if (elapsed % 10 === 0) console.log(`Song is still generating (${elapsed}s)...`);
-                    }
-
-                    // Refresh logic
-                    const elapsed = Date.now() - startTime;
-                    if (elapsed > 60000 && elapsed < 70000 && !download) {
-                        console.log('Reloading page to refresh song status...');
-                        await this.page.reload({ waitUntil: 'domcontentloaded' });
-                        await this.page.waitForTimeout(5000);
-                    }
-
-                    // 1. Find "More Actions"
-                    // Helper to log *once* if we fail to find the button
-                    // We target the list container to be safe.
-                    // Important: The button might be hidden until we HOVER the row.
-
-                    // Strategy: Find the first Play button (top of list) and hover it/its container.
                     const firstPlayBtn = this.page.locator('button[aria-label="Play"], button[title="Play"]').first();
                     if (await firstPlayBtn.isVisible()) {
-                        await firstPlayBtn.hover();
-                        await this.page.waitForTimeout(500); // Wait for hover effects
+                        // console.log('Clicking Play to trigger network request...');
+                        await firstPlayBtn.click({ timeout: 1000 }).catch(() => { });
                     }
+                } catch (e) { }
 
-                    const moreActionsBtn = this.page.locator('button[aria-label*="More actions"], button[aria-label*="More"], button[data-testid="more-actions"]').first();
-
-                    if (await moreActionsBtn.isVisible()) {
-                        console.log('Found "More Actions" button. Clicking...');
-                        await moreActionsBtn.focus();
-                        await moreActionsBtn.click();
-
-                        // 2. Look for "Download"
-                        await this.page.waitForTimeout(1000); // Wait for menu animation
-                        const downloadMenuItem = this.page.getByText('Download', { exact: true });
-
-                        if (await downloadMenuItem.isVisible()) {
-                            console.log('Found "Download" option. Hovering and clicking...');
-                            await downloadMenuItem.hover();
-                            try { await downloadMenuItem.click({ timeout: 1000 }); } catch (e) { }
-
-                            // 3. Look for "MP3 Audio"
-                            await this.page.waitForTimeout(500);
-                            const audioMenuItem = this.page.getByText('MP3 Audio', { exact: false }).first();
-
-                            if (await audioMenuItem.isVisible()) {
-                                console.log('Found "MP3 Audio" option. Starting download...');
-                                const downloadPromise = this.page.waitForEvent('download', { timeout: 60000 }); // Increased timeout
-                                await audioMenuItem.click();
-
-                                // Handle potential "Commercial Rights" modal
-                                try {
-                                    // Use a short polling mechanism or waitFor with short timeout to see if modal pops up
-                                    const downloadAnywayBtn = this.page.getByText('Download Anyway', { exact: true });
-                                    // We wait up to 3 seconds for this modal. If it doesn't show, good.
-                                    await downloadAnywayBtn.waitFor({ state: 'visible', timeout: 3000 });
-                                    if (await downloadAnywayBtn.isVisible()) {
-                                        console.log('Commercial rights modal detected. Clicking "Download Anyway"...');
-                                        await downloadAnywayBtn.click();
-                                    }
-                                } catch (e) {
-                                    // Modal did not appear, proceed as normal
-                                }
-
-                                const downloadEvent = await downloadPromise;
-
-                                const downloadDir = path.join(process.cwd(), 'downloads');
-                                if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
-
-                                title = prompt.slice(0, 20).replace(/[^a-z0-9]/gi, '_').toLowerCase();
-                                const fileName = `${title}_${Date.now()}.mp3`;
-                                const filePath = path.join(downloadDir, fileName);
-
-                                await downloadEvent.saveAs(filePath);
-                                console.log(`Audio saved to: ${filePath}`);
-                                return {
-                                    timestamp: new Date().toISOString(),
-                                    prompt: prompt,
-                                    status: 'Completed',
-                                    file: filePath
-                                };
-                            } else {
-                                console.log('Download menu open, but "MP3 Audio" not visible yet.');
-                            }
-                        } else {
-                            console.log('More menu open, but "Download" not visible. Song might be processing.');
-                        }
-
-                        // Close menu to reset state for next loop
-                        await this.page.keyboard.press('Escape');
-                    } else {
-                        console.log('Could not find "more actions" button.');
-                    }
-                } catch (e) {
-                    console.log('Error in download loop:', e.message);
+                // Check for "Generating" text to give feedback
+                const generatingLabel = this.page.getByText('Generating...', { exact: false }).first();
+                if (await generatingLabel.isVisible()) {
+                    if ((Date.now() - startTime) % 10000 < 2000) console.log('Song is still generating...');
+                } else {
+                    if ((Date.now() - startTime) % 5000 < 1000) process.stdout.write('.');
                 }
 
-                // Detailed progress log every 10s
-                if ((Date.now() - startTime) % 10000 < 2000) {
-                    console.log(`Waiting for download check... (${Math.floor((Date.now() - startTime) / 1000)}s)`);
-                }
-                await this.page.waitForTimeout(2000);
+                await this.page.waitForTimeout(1000);
             }
 
-            console.log('\nTimed out waiting for download option.');
-            return {
-                timestamp: new Date().toISOString(),
-                prompt: prompt,
-                status: 'Timeout waiting for download'
-            };
+            // cleanup listener
+            this.page.removeListener('response', responseHandler);
+
+            if (capturedAudio) {
+                console.log('\nAudio captured successfully!');
+
+                const downloadDir = path.join(process.cwd(), 'downloads');
+                if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
+
+                title = prompt.slice(0, 20).replace(/[^a-z0-9]/gi, '_').toLowerCase();
+                const fileName = `${title}_${Date.now()}.mp3`;
+                const filePath = path.join(downloadDir, fileName);
+
+                fs.writeFileSync(filePath, capturedAudio.buffer);
+                console.log(`Audio saved to: ${filePath}`);
+
+                return {
+                    timestamp: new Date().toISOString(),
+                    prompt: prompt,
+                    status: 'Completed',
+                    file: filePath
+                };
+            } else {
+                console.log('\nTimed out waiting for audio network request.');
+                return {
+                    timestamp: new Date().toISOString(),
+                    prompt: prompt,
+                    status: 'Timeout waiting for audio network request'
+                };
+            }
 
         } catch (e) {
             console.warn('Error during download process:', e.message);
