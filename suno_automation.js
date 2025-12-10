@@ -204,6 +204,15 @@ export class SunoBot {
                     // 1. Find "More Actions"
                     // Helper to log *once* if we fail to find the button
                     // We target the list container to be safe.
+                    // Important: The button might be hidden until we HOVER the row.
+
+                    // Strategy: Find the first Play button (top of list) and hover it/its container.
+                    const firstPlayBtn = this.page.locator('button[aria-label="Play"], button[title="Play"]').first();
+                    if (await firstPlayBtn.isVisible()) {
+                        await firstPlayBtn.hover();
+                        await this.page.waitForTimeout(500); // Wait for hover effects
+                    }
+
                     const moreActionsBtn = this.page.locator('button[aria-label*="More actions"], button[aria-label*="More"], button[data-testid="more-actions"]').first();
 
                     if (await moreActionsBtn.isVisible()) {
