@@ -175,7 +175,12 @@ export class SunoBot {
             // Instead of fighting the UI menus, we will listen for the audio file being fetched by the browser.
             // When we click "Play", the browser requests the MP3/WAV from the CDN. We catch that.
 
-            console.log('Monitoring network traffic for audio');            // Set up listener for MP3/WAV responses
+            console.log('Monitoring network traffic for audio');
+
+            let downloadPromiseResolve;
+            const downloadPromise = new Promise(resolve => downloadPromiseResolve = resolve);
+
+            // Set up listener for MP3/WAV responses
             const responseHandler = async (response) => {
                 const url = response.url();
                 const headers = response.headers();
