@@ -175,28 +175,21 @@ export class SunoBot {
             // Instead of fighting the UI menus, we will listen for the audio file being fetched by the browser.
             // When we click "Play", the browser requests the MP3/WAV from the CDN. We catch that.
 
-            console.log('Monitoring network traffic for audio files...');
-
-            let downloadPromiseResolve;
-            const downloadPromise = new Promise(resolve => downloadPromiseResolve = resolve);
-
-            // Set up listener for MP3/WAV responses
+            console.log('Monitoring network traffic for audio');            // Set up listener for MP3/WAV responses
             const responseHandler = async (response) => {
                 const url = response.url();
-                // Check if it's an audio file from Suno's CDN
-                // Usually cdn1.suno.ai, ending in .mp3 or with audio content-type
-                if ((url.includes('.mp3') || url.includes('.wav')) && !url.includes('sil-100')) {
-                    console.log(`Intercepted audio URL: ${url}`);
+                const headers = response.headers();
+                const contentType = headers['content-type'] || '';
 
-                    // Double check content type if needed, but extension is usually safe enough here
-                    try {
-                        const buffer = await response.body();
-                        if (buffer.length > 1000) { // Ensure it's not a tiny error file
-                            downloadPromiseResolve({ buffer, url });
-                        }
-                    } catch (e) {
-                        console.log('Failed to read intercepted buffer:', e.message);
-                    }
+                // Debug log to see what's happening
+                // if (url.includes('.mp3') || contentType.includes('audio')) console.log(`Traffic: ${url} [${contentType}]`);
+
+                // Check if it's an audio file from Suno's CDN
+                // We accept .mp3 extension OR audio/mpeg content type
+                // We exclude silence and tiny chunks if possible
+                if ((url.includes('.mp3') || contentType.includes('audio/mpeg') || contentType.includes('audio/wav')) && !url.includes('sil-100')) {
+                    console.log(`\nIntercepted candidate audio URL: ${url}`);
+                    downloadPromiseResolve(url); // Just resolve with URL, don't read body yet
                 }
             };
 
@@ -206,32 +199,32 @@ export class SunoBot {
             const startTime = Date.now();
             const timeout = 300000; // 5 mins
 
-            let capturedAudio = null;
+            let capturedUrl = null;
             let title = 'generated_song'; // Define title here for scope
 
             while (Date.now() - startTime < timeout) {
                 // Check if our promise resolved (we found a file)
-                // We use a race with a small timeout so we can keep looping/clicking
                 const raceResult = await Promise.race([
                     downloadPromise,
                     new Promise(r => setTimeout(r, 2000)) // 2s tick
                 ]);
 
-                if (raceResult && raceResult.buffer) {
-                    capturedAudio = raceResult;
+                if (raceResult && typeof raceResult === 'string') {
+                    capturedUrl = raceResult;
                     break;
                 }
 
                 // If not found yet, try clicking Play on the first item
                 try {
-                    const firstPlayBtn = this.page.locator('button[aria-label="Play"], button[title="Play"]').first();
+                    // Try generic play button or specific ones
+                    // Suno often has a big play button or list play buttons.
+                    const firstPlayBtn = this.page.locator('button[aria-label="Play"], button[title="Play"], [data-testid="play-button"]').first();
                     if (await firstPlayBtn.isVisible()) {
-                        // console.log('Clicking Play to trigger network request...');
                         await firstPlayBtn.click({ timeout: 1000 }).catch(() => { });
                     }
                 } catch (e) { }
 
-                // Check for "Generating" text to give feedback
+                // Feedback
                 const generatingLabel = this.page.getByText('Generating...', { exact: false }).first();
                 if (await generatingLabel.isVisible()) {
                     if ((Date.now() - startTime) % 10000 < 2000) console.log('Song is still generating...');
@@ -245,8 +238,8 @@ export class SunoBot {
             // cleanup listener
             this.page.removeListener('response', responseHandler);
 
-            if (capturedAudio) {
-                console.log('\nAudio captured successfully!');
+            if (capturedUrl) {
+                console.log(`\nDownloading captured URL: ${capturedUrl}...`);
 
                 const downloadDir = path.join(process.cwd(), 'downloads');
                 if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
@@ -255,7 +248,11 @@ export class SunoBot {
                 const fileName = `${title}_${Date.now()}.mp3`;
                 const filePath = path.join(downloadDir, fileName);
 
-                fs.writeFileSync(filePath, capturedAudio.buffer);
+                // Perform separate download request
+                const response = await this.context.request.get(capturedUrl);
+                const buffer = await response.body();
+
+                fs.writeFileSync(filePath, buffer);
                 console.log(`Audio saved to: ${filePath}`);
 
                 return {
