@@ -186,85 +186,86 @@ export class SunoBot {
 
             while (Date.now() - startTime < timeout) {
                 try {
-                    // Refresh page after 1 minute if we haven't found it yet. 
-                    // This often fixes the issue where the "Download" option isn't available immediately.
-                    const elapsed = Date.now() - startTime;
-                    if (elapsed > 60000 && elapsed < 70000 && !download) { // Run once around 60s
-                        console.log('Reloading page to refresh song status...');
-                        await this.page.reload({ waitUntil: 'domcontentloaded' });
-                        await this.page.waitForTimeout(5000); // Wait for hydration
+                    // Check if still generating (optional feedback)
+                    const generatingLabel = this.page.getByText('Generating...', { exact: false }).first();
+                    if (await generatingLabel.isVisible()) {
+                        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                        if (elapsed % 10 === 0) console.log(`Song is still generating (${elapsed}s)...`);
                     }
 
-                    // 1. Find the "More Actions" button.
-                    // Try multiple selectors. 
-                    // We specifically look for the *most recent* song's menu.
-                    // Often this is the first "More actions" button in the list.
-                    const moreActionsBtn = this.page.locator('button[aria-label*="More actions"], button[aria-label="More"], button[data-testid="more-actions"]').first();
+                    // Refresh logic
+                    const elapsed = Date.now() - startTime;
+                    if (elapsed > 60000 && elapsed < 70000 && !download) {
+                        console.log('Reloading page to refresh song status...');
+                        await this.page.reload({ waitUntil: 'domcontentloaded' });
+                        await this.page.waitForTimeout(5000);
+                    }
+
+                    // 1. Find "More Actions"
+                    // Helper to log *once* if we fail to find the button
+                    // We target the list container to be safe.
+                    const moreActionsBtn = this.page.locator('button[aria-label*="More actions"], button[aria-label*="More"], button[data-testid="more-actions"]').first();
 
                     if (await moreActionsBtn.isVisible()) {
-                        // Scroll to it/focus it
+                        console.log('Found "More Actions" button. Clicking...');
                         await moreActionsBtn.focus();
                         await moreActionsBtn.click();
 
-                        // 2. Wait for Menu to appear and looking for "Download"
-                        // It might take a moment for the react portal to open
-                        await this.page.waitForTimeout(1000);
-
+                        // 2. Look for "Download"
+                        await this.page.waitForTimeout(1000); // Wait for menu animation
                         const downloadMenuItem = this.page.getByText('Download', { exact: true });
+
                         if (await downloadMenuItem.isVisible()) {
+                            console.log('Found "Download" option. Hovering and clicking...');
                             await downloadMenuItem.hover();
-                            // Sometimes clicking "Download" itself is needed, sometimes just hover.
-                            // We'll click it to be safe, but catch error if it's just a trigger.
                             try { await downloadMenuItem.click({ timeout: 1000 }); } catch (e) { }
 
-                            // 3. Click "MP3 Audio" (Updated based on screenshot)
-                            // Screenshot shows "MP3 Audio" entry.
+                            // 3. Look for "MP3 Audio"
+                            await this.page.waitForTimeout(500);
                             const audioMenuItem = this.page.getByText('MP3 Audio', { exact: false }).first();
 
-                            // Wait a moment for submenu
-                            await this.page.waitForTimeout(500);
-
                             if (await audioMenuItem.isVisible()) {
-
-                                console.log('Found Download -> MP3 Audio option. Clicking...');
-                                // Setup download listener BEFORE clicking
+                                console.log('Found "MP3 Audio" option. Starting download...');
                                 const downloadPromise = this.page.waitForEvent('download', { timeout: 30000 });
                                 await audioMenuItem.click();
                                 const downloadEvent = await downloadPromise;
 
-                                // Save the file
                                 const downloadDir = path.join(process.cwd(), 'downloads');
-                                if (!fs.existsSync(downloadDir)) {
-                                    fs.mkdirSync(downloadDir);
-                                }
+                                if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
 
-                                // Clean up title
                                 title = prompt.slice(0, 20).replace(/[^a-z0-9]/gi, '_').toLowerCase();
                                 const fileName = `${title}_${Date.now()}.mp3`;
                                 const filePath = path.join(downloadDir, fileName);
 
                                 await downloadEvent.saveAs(filePath);
                                 console.log(`Audio saved to: ${filePath}`);
-
                                 return {
                                     timestamp: new Date().toISOString(),
                                     prompt: prompt,
                                     status: 'Completed',
                                     file: filePath
                                 };
+                            } else {
+                                console.log('Download menu open, but "MP3 Audio" not visible yet.');
                             }
+                        } else {
+                            console.log('More menu open, but "Download" not visible. Song might be processing.');
                         }
 
-                        // If we opened the menu but couldn't find download/audio, close it to retry
+                        // Close menu to reset state for next loop
                         await this.page.keyboard.press('Escape');
+                    } else {
+                        console.log('Could not find "more actions" button.');
                     }
                 } catch (e) {
-                    // Ignore transient errors
+                    console.log('Error in download loop:', e.message);
                 }
 
-                // Wait before retry
-                console.log(`Waiting for download option... (${Math.floor((Date.now() - startTime) / 1000)}s)`);
-                await this.page.waitForTimeout(5000);
+                // Detailed progress log every 10s
+                if ((Date.now() - startTime) % 10000 < 2000) {
+                    console.log(`Waiting for download check... (${Math.floor((Date.now() - startTime) / 1000)}s)`);
+                }
+                await this.page.waitForTimeout(2000);
             }
 
             console.log('\nTimed out waiting for download option.');
