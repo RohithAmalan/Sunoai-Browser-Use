@@ -235,8 +235,23 @@ export class SunoBot {
 
                             if (await audioMenuItem.isVisible()) {
                                 console.log('Found "MP3 Audio" option. Starting download...');
-                                const downloadPromise = this.page.waitForEvent('download', { timeout: 30000 });
+                                const downloadPromise = this.page.waitForEvent('download', { timeout: 60000 }); // Increased timeout
                                 await audioMenuItem.click();
+
+                                // Handle potential "Commercial Rights" modal
+                                try {
+                                    // Use a short polling mechanism or waitFor with short timeout to see if modal pops up
+                                    const downloadAnywayBtn = this.page.getByText('Download Anyway', { exact: true });
+                                    // We wait up to 3 seconds for this modal. If it doesn't show, good.
+                                    await downloadAnywayBtn.waitFor({ state: 'visible', timeout: 3000 });
+                                    if (await downloadAnywayBtn.isVisible()) {
+                                        console.log('Commercial rights modal detected. Clicking "Download Anyway"...');
+                                        await downloadAnywayBtn.click();
+                                    }
+                                } catch (e) {
+                                    // Modal did not appear, proceed as normal
+                                }
+
                                 const downloadEvent = await downloadPromise;
 
                                 const downloadDir = path.join(process.cwd(), 'downloads');
