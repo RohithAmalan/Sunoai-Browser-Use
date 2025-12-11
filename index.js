@@ -35,7 +35,8 @@ const askQuestion = (query) => new Promise((resolve) => rl.question(query, resol
         console.log('Please check this terminal window!');
         console.log('-----------------------------------\n');
 
-        const prompt = await askQuestion('Enter your song description: ');
+        const prompt = await askQuestion('Enter your song description (or press Enter to download recent songs only): ');
+
         if (prompt.trim()) {
             const instrumentalInput = await askQuestion('Instrumental only? (y/n): ');
             const instrumental = instrumentalInput.toLowerCase().startsWith('y');
@@ -55,9 +56,16 @@ const askQuestion = (query) => new Promise((resolve) => rl.question(query, resol
             fs.writeFileSync(songsFile, JSON.stringify(songs, null, 2));
             console.log(`Song info saved to ${songsFile}`);
 
+            // Wait for generation visibility before downloading
+            console.log('\nWaiting a moment for new songs to appear...');
+            await new Promise(r => setTimeout(r, 5000));
+
         } else {
-            console.log('No prompt entered, exiting.');
+            console.log('Skipping generation, proceeding to download...');
         }
+
+        console.log('\nStarting download process for recent songs...');
+        await bot.downloadRecentSongs(5);
 
     } catch (error) {
         console.error('An error occurred:', error);

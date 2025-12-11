@@ -1,5 +1,7 @@
 node_modules
-auth.json
+auth.json*
 *.mp3
 generated_songs.json
 .DS_Store
+
+downloads/

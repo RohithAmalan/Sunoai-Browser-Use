@@ -1,4 +1,3 @@
-
 import { chromium } from 'playwright';
 import fs from 'fs';
 import path from 'path';
@@ -12,281 +11,516 @@ export class SunoBot {
     }
 
     async initialize(headless = false) {
-        console.log('Launching browser...');
+        // console.error('Launching browser...');
         this.browser = await chromium.launch({
             headless: headless,
-            channel: 'chrome', // Try to use the installed Google Chrome
+            channel: 'chrome',
             args: [
                 '--no-sandbox',
-                '--disable-blink-features=AutomationControlled', // Mask automation
+                '--disable-blink-features=AutomationControlled',
                 '--start-maximized'
             ],
-            ignoreDefaultArgs: ['--enable-automation'] // Hide "Chrome is being controlled by automated software"
+            ignoreDefaultArgs: ['--enable-automation'],
+            ignoreHTTPSErrors: true
         });
 
-        let contextOptions = {};
+        let contextOptions = { ignoreHTTPSErrors: true };
         if (fs.existsSync(this.storageStatePath)) {
-            console.log('Found existing session, loading...');
+            // console.error('Found existing session, loading...');
             contextOptions.storageState = this.storageStatePath;
         }
 
         this.context = await this.browser.newContext(contextOptions);
         this.page = await this.context.newPage();
-
-        // Save storage state on close or periodically if possible, 
-        // but definitely after login success is detected.
     }
 
     async ensureLoggedIn() {
-        console.log('Navigating to Suno Create page...');
-        await this.page.goto('https://suno.com/create', { waitUntil: 'domcontentloaded' });
+        // console.error('Navigating to Suno Create page...');
+        try {
+            await this.page.goto('https://suno.com/create', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        } catch (e) {
+            console.warn(`Navigation error: ${e.message}`);
+        }
 
         try {
-            console.log('Checking login status...');
-
-            // Wait for the prompt input to appear. 
-            // We loop this to provide feedback to the user.
-            const promptSelector = 'textarea, [contenteditable="true"]';
+            // console.error('Checking login status...');
             let loggedIn = false;
 
-            // Check for 5 minutes (300 seconds)
             for (let i = 0; i < 60; i++) {
-                try {
-                    // Check if we are on the create page
-                    if (this.page.url().includes('/create')) {
-                        // Check for "Song Description" text which indicates the form is loaded
-                        const descriptionLabel = this.page.getByText('Song Description');
-                        if (await descriptionLabel.isVisible()) {
-                            loggedIn = true;
-                            console.log('Detected "Song Description" label - Login confirmed!');
-                            break;
-                        }
+                if (this.page.isClosed()) throw new Error('Browser closed by user.');
 
-                        // Fallback to searching for a textarea
-                        const textarea = this.page.locator('textarea');
-                        if (await textarea.count() > 0) {
-                            loggedIn = true;
-                            console.log('Detected textarea - Login confirmed!');
-                            break;
-                        }
+                const url = this.page.url();
+                if (url.includes('/create')) {
+                    // Check for common elements
+                    const descLabel = this.page.getByText('Song Description');
+                    const profileIcon = this.page.locator('button[data-testid="profile-menu"]');
+                    const anywhereInput = this.page.locator('textarea, [contenteditable="true"]');
+
+                    if (await descLabel.isVisible() || await profileIcon.count() > 0 || await anywhereInput.count() > 0) {
+                        loggedIn = true;
+                        // console.error('Login confirmed!');
+                        break;
                     }
-
-                    // Wait a bit before retrying
-                    await this.page.waitForTimeout(5000);
-
-                } catch (e) {
-                    console.log(`Waiting for login... (${(i + 1) * 5}/300s) - Please log in manually.`);
-                    await this.page.waitForTimeout(5000);
                 }
+
+                if (this.browser._options?.headless && i === 2) {
+                    console.warn('\n⚠️ WARNING: Headless mode detected. Login might be invisible.\n');
+                }
+
+                await this.page.waitForTimeout(5000);
             }
 
-            if (!loggedIn) {
-                throw new Error('Login timeout. Please try again.');
-            }
+            if (!loggedIn) throw new Error('Login timeout.');
 
-            console.log('Logged in successfully!');
-            console.log('Saving session state...');
             await this.context.storageState({ path: this.storageStatePath });
-            console.log(`Session saved to ${this.storageStatePath}`);
+            // // console.error(`Session saved.`);
 
         } catch (e) {
-            console.error('Login failed or timed out:', e.message);
+            // console.error('Login check failed:', e.message);
             throw e;
         }
     }
 
-    async generateSong(prompt, instrumental = false) {
-        if (!prompt) {
-            throw new Error('Prompt is required');
-        }
+    async generateSong(prompt, instrumental = false, customDownloadDir = null, wait = true) {
+        if (!prompt) throw new Error('Prompt is required');
 
-        console.log(`Entering prompt: "${prompt}"`);
+        // console.log(`Entering prompt: "${prompt}"`);
 
-        // Selectors (Updating these based on typical Suno structure, but may need adjustment if site changes)
-        // The main prompt area is usually a textarea.
-        // We specifically want the VISIBLE textarea to avoid interacting with hidden ones (e.g. from other tabs/modes)
-        const promptSelector = 'textarea:visible';
-
-        // Wait for it to be ready
-        const promptInput = this.page.locator(promptSelector).first();
-        await promptInput.waitFor({ state: 'visible', timeout: 10000 });
-
-        await promptInput.fill(prompt);
-
-        // If instrumental, find the toggle. 
-        if (instrumental) {
-            console.log('Selecting Instrumental...');
-            try {
-                // Try to find the switch or button. 
-                // Based on screenshot, it might be a button with text "Instrumental"
-                // We need to check if it's already active to avoid toggling it OFF.
-                const instrumentalBtn = this.page.getByText('Instrumental', { exact: true });
-                if (await instrumentalBtn.isVisible()) {
-                    await instrumentalBtn.click();
-                } else {
-                    console.warn('Instrumental element not visible.');
-                }
-            } catch (e) {
-                console.warn('Could not set Instrumental:', e.message);
-            }
-        }
-
-        console.log('Clicking Create button...');
         try {
-            // Strategy 1: The "Create" button at the bottom of the form
-            // It often has a specific class or ID, but text is best.
-            // We'll try specific role first.
-            const createBtn = this.page.getByRole('button', { name: /^Create$/i }).first();
+            // 1. LOCATE THE INPUT (Robust Strategy)
+            // It could be a textarea OR a contenteditable div
+            let inputElement = null;
 
-            if (await createBtn.isVisible()) {
+            // Strategy A: Try Placeholder (Most reliable for Suno)
+            try {
+                const placeholderInput = this.page.getByPlaceholder('Song Description', { exact: false });
+                if (await placeholderInput.count() > 0 && await placeholderInput.first().isVisible()) {
+                    inputElement = placeholderInput.first();
+                    // console.error('  Found input by placeholder.');
+                }
+            } catch (e) { }
+
+            // Strategy B: Visible Textarea (Backup)
+            if (!inputElement) {
+                const textareas = this.page.locator('textarea:visible');
+                if (await textareas.count() > 0) {
+                    inputElement = textareas.first();
+                    // console.error('  Found input by textarea tag.');
+                }
+            }
+
+            // Strategy C: Label (Careful validation needed)
+            if (!inputElement) {
+                try {
+                    const labeledInput = this.page.getByLabel('Song Description');
+                    if (await labeledInput.isVisible()) {
+                        // Validate it's not a button (Suno has a "Generate random" button with this label sometimes)
+                        const tagName = await labeledInput.evaluate(el => el.tagName.toLowerCase());
+                        const isEditable = await labeledInput.evaluate(el => el.isContentEditable || ['textarea', 'input'].includes(el.tagName.toLowerCase()));
+
+                        if (isEditable && tagName !== 'button') {
+                            inputElement = labeledInput;
+                            // console.error('  Found input by label.');
+                        } else {
+                            // console.error('  Skipping label match (it was a button or non-editable).');
+                        }
+                    }
+                } catch (e) { }
+            }
+
+            if (!inputElement) throw new Error('Could not find prompts input (textarea/Song Description)');
+
+            // 2. FILL THE INPUT (Pure Keyboard Strategy)
+            // This automates the "manual human filling process" exactly
+            // console.error('  Focusing input...');
+            await inputElement.click();
+            await this.page.waitForTimeout(500);
+
+            // Select All and Delete (Cmd+A / Ctrl+A -> Backspace)
+            const isMac = process.platform === 'darwin';
+            const modifier = isMac ? 'Meta' : 'Control';
+
+            // console.error(`  Clearing text using ${modifier}+A...`);
+            await this.page.keyboard.press(`${modifier}+A`);
+            await this.page.waitForTimeout(200);
+            await this.page.keyboard.press('Backspace');
+            await this.page.waitForTimeout(200);
+
+            // Type the prompt exactly like a human
+            // console.error(`  Typing prompt: "${prompt}"...`);
+            await this.page.keyboard.type(prompt, { delay: 50 }); // 50ms per key
+            await this.page.waitForTimeout(1000);
+
+            // Verify content
+            const finalVal = await inputElement.inputValue().catch(() => inputElement.textContent());
+            // console.error(`  Verifying input: "${finalVal ? finalVal.substring(0, 20) : 'EMPTY'}..."`);
+
+            // Fallback if keyboard failed (rare)
+            if (!finalVal || !finalVal.includes(prompt.substring(0, 3))) {
+                console.warn('  ⚠️ Keyboard typing ineffective. Trying fallback fill...');
+                await inputElement.fill(prompt);
+            }
+
+            // Click outside to blur/validate
+            await this.page.locator('body').click({ position: { x: 0, y: 0 } });
+            await this.page.waitForTimeout(1000);
+
+            // 3. INSTRUMENTAL
+            // We ensure the state matches the request using aria-labels
+            try {
+                const enableBtn = this.page.locator('button[aria-label="Enable instrumental mode"]');
+                const disableBtn = this.page.locator('button[aria-label="Disable instrumental mode"]');
+                // (Note: Suno's label might be slightly different, but usually they toggle labels or use aria-pressed)
+                // If we can't find specific labels, we might rely on state checking. 
+                // But for now, assuming "Enable" exists when off is safe based on previous observation.
+
+                if (instrumental) {
+                    if (await enableBtn.count() > 0 && await enableBtn.isVisible()) {
+                        // console.error('  Switching Instrumental ON...');
+                        await enableBtn.click();
+                    }
+                    // else: it effectively means it's already ON or checking failed.
+                } else {
+                    // We want it OFF.
+                    // If we see a "Disable" button, click it to turn off.
+                    if (await disableBtn.count() > 0 && await disableBtn.isVisible()) {
+                        // console.error('  Switching Instrumental OFF...');
+                        await disableBtn.click();
+                    }
+                    // Also check if the "Enable" button has a pressed state?
+                    // Safe cleanup: just ensure we didn't leave it on from previous run.
+                }
+            } catch (e) { console.error('Instrumental toggle warning:', e.message); }
+
+            // CHECK FOR CREDITS
+            const limitMsg = this.page.getByText('Out of Credits', { exact: false });
+            const zeroCredits = this.page.getByText('0 credits left', { exact: false });
+
+            if (await limitMsg.isVisible() || await zeroCredits.isVisible()) {
+                throw new Error('TERM_LIMIT_EXCEEDED: You have run out of credits on Suno.');
+            }
+
+            // 4. CLICK CREATE & CAPTURE STATE
+
+            // Capture existing song IDs BEFORE clicking Create
+            const preCreateLinks = this.page.locator('a[href^="/song/"]');
+            const preCount = await preCreateLinks.count();
+            const existingIds = new Set();
+            for (let i = 0; i < Math.min(preCount, 20); i++) {
+                const href = await preCreateLinks.nth(i).getAttribute('href');
+                if (href) existingIds.add(href.split('/').pop());
+            }
+            // console.error(`  Captured ${existingIds.size} existing songs.`);
+
+            // console.error('Clicking Create...');
+            const createBtn = this.page.locator('button').filter({ hasText: /^Create$/ }).first();
+
+            // Wait for it to enable
+            try {
+                await createBtn.waitFor({ state: 'visible', timeout: 5000 });
+            } catch (e) { }
+
+            // Log button state for debugging
+            const isDisabled = await createBtn.getAttribute('disabled') !== null;
+
+            if (!isDisabled) {
                 await createBtn.click();
             } else {
-                throw new Error('Role button not found');
+                // console.error('⚠️ Create button disabled. Attempting force click...');
+                await createBtn.click({ force: true });
+            }
+
+            // console.error('⏳ Waiting for NEW songs to appear in list...');
+
+            // Define the polling function
+            const pollForDownloads = async () => {
+                let songsDownloaded = 0;
+                const maxAttempts = 60; // 60 * 5s = 5 mins
+                const processedIds = new Set();
+                const downloadedPaths = [];
+
+                const downloadDir = customDownloadDir || path.resolve(process.cwd(), 'downloads');
+                if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
+
+                // Loop to wait for new songs
+                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                    if (songsDownloaded >= 2) break;
+
+                    try {
+                        // Scan for new songs
+                        const currentLinks = this.page.locator('a[href^="/song/"]');
+                        const linkCount = await currentLinks.count();
+
+                        // Inspect top 4 items
+                        for (let i = 0; i < Math.min(linkCount, 4); i++) {
+                            if (songsDownloaded >= 2) break;
+
+                            const link = currentLinks.nth(i);
+                            const href = await link.getAttribute('href');
+                            if (!href) continue;
+
+                            const songId = href.split('/').pop();
+
+                            // CRITICAL CHECK: Is this a NEW song?
+                            if (existingIds.has(songId)) {
+                                // This is an old song, ignore it.
+                                // Since new songs appear at the top, if we see an old song at index 0, 
+                                // it means new songs haven't appeared yet.
+                                continue;
+                            }
+
+                            // It is a NEW song!
+                            if (processedIds.has(songId)) continue; // Already handled this new one
+
+                            // console.error(`    🆕 New Song Detected: ${songId}`);
+
+                            // Find the card/menu button using robust selector
+                            let card = link.locator('xpath=./ancestor::div[contains(@class, "clip-row")]').first();
+                            if (await card.count() === 0) card = link.locator('xpath=../../../../../..');
+
+                            const buttons = card.locator('button');
+                            const btnCount = await buttons.count();
+
+                            let menuBtn = null;
+                            if (btnCount > 0) {
+                                for (let b = btnCount - 1; b >= 0; b--) {
+                                    const btn = buttons.nth(b);
+                                    const txt = await btn.innerText();
+                                    const h = await btn.innerHTML();
+                                    if (txt.trim() === '' && h.includes('<svg')) {
+                                        menuBtn = btn;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (menuBtn) {
+                                // Try to download
+                                const result = await this.downloadSongViaMenu(menuBtn, i, downloadDir);
+                                if (result) {
+                                    // console.error(`    ✅ Downloaded NEW song (${songId})`);
+                                    songsDownloaded++;
+                                    processedIds.add(songId);
+                                    downloadedPaths.push(result); // Result is the path
+                                } else {
+                                    // Failure might mean "Generation not ready". 
+                                    // The download function usually closes menu on fail.
+                                    // We will retry next loop iteration.
+                                    // console.error(`    ⏳ Song ${songId} not ready (or menu failed). Retrying...`);
+                                }
+                            }
+                        }
+                    } catch (pollErr) { console.error('Poll error', pollErr); }
+
+                    // if we haven't found new songs yet, let's wait a bit
+                    await this.page.waitForTimeout(5000);
+                }
+
+                if (songsDownloaded < 2) {
+                    console.warn(`⚠️ Timed out. Only downloaded ${songsDownloaded}/2 songs.`);
+                } else {
+                    // console.error(`✅ Successfully generated and downloaded all songs.`);
+                }
+                return downloadedPaths;
+            };
+
+            if (wait) {
+                const paths = await pollForDownloads();
+                return { success: true, message: "Generation and download complete.", paths: paths };
+            } else {
+                // Background mode: Fire and forget (but catch errors to prevent crashing)
+                pollForDownloads().catch(e => console.error('Background polling validation failed:', e));
+                return { success: true, message: "Generation started in background. Please check list_songs in a few minutes." };
             }
 
         } catch (e) {
-            console.log('Primary button strategy failed. Trying alternatives...');
-            try {
-                // Strategy 2: Click the visible text "Create" that acts as a button
-                // This catches divs/spans with onClick handlers
-                const createText = this.page.locator(':text-matches("^Create$", "i")')
-                    .locator('visible=true')
-                    .last(); // Often the last one is the main action
-                await createText.click({ timeout: 3000 });
-            } catch (e2) {
-                console.log('Text click failed. Trying Enter key in prompt...');
-                // Strategy 3: Press Enter in the prompt textarea (often submits)
-                const promptSelector = 'textarea:visible';
-                await this.page.locator(promptSelector).first().press('Enter');
+            // console.error('Generation process failed:', e);
+            return { success: false, error: e.message };
+        }
+    }
+
+    async downloadRecentSongs(count = 50, customDownloadDir = null) {
+        // console.log(`Downloading ${count} songs via Hub/Link Strategy...`);
+        const downloadDir = customDownloadDir || path.resolve(process.cwd(), 'downloads');
+        if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
+
+        await this.page.waitForTimeout(3000);
+
+        // 1. Find all Song Links to identify rows
+        // Songs usually have a link to /song/id
+        const songLinks = this.page.locator('a[href^="/song/"]');
+        let linkCount = await songLinks.count();
+        // console.error(`Found ${linkCount} song links.`);
+
+        // If no links found, try the old trigger method as backup
+        if (linkCount === 0) {
+            // console.error('⚠️ No song links found. Falling back to context menu trigger...');
+            // ... (keep old logic or just fail gracefully)
+        }
+
+        let songsDownloaded = 0;
+        const processedIds = new Set();
+
+        for (let i = 0; i < linkCount; i++) {
+            if (songsDownloaded >= count) break;
+
+            const link = songLinks.nth(i);
+            const href = await link.getAttribute('href');
+
+            // Avoid processing same song twice (title and cover might both link)
+            const songId = href.split('/').pop();
+            if (processedIds.has(songId)) continue;
+            processedIds.add(songId);
+
+            // console.error(`Processing Song ID: ${songId}...`);
+
+            // Find the Row/Card container
+            // We go up 4-5 levels to find the container that holds both the link and the menu button.
+            // Heuristic: The row usually has class "flex" or "grid".
+            // We can look for a "More actions" button in the vicinity.
+
+            // Access the common parent container
+            // Debugging showed the row is ~6 levels up and has class 'clip-row'
+            let card = link.locator('xpath=./ancestor::div[contains(@class, "clip-row")]').first();
+
+            // Fallback if class name changes: Go 6 levels up
+            if (await card.count() === 0) {
+                // // console.error('  ⚠️ "clip-row" not found, using generic 6-level ancestor...');
+                card = link.locator('xpath=../../../../../..');
+            }
+
+            const cardCount = await card.count();
+            // // console.error(`  Card count: ${cardCount}`);
+
+            if (cardCount === 0) {
+                // console.error('  ⚠️ Could not determine song card container.');
+                continue;
+            }
+
+            // Find the menu button within this card
+            const buttons = card.locator('button');
+            const btnCount = await buttons.count();
+            // // console.error(`  Card found. Buttons in card: ${btnCount}`);
+
+            let menuBtn = null;
+
+            // The menu button is typically the last one (Three dots)
+            // We scan backwards or pick the last button that looks like a menu (icon w/o text)
+            if (btnCount > 0) {
+                // Try simple heuristic: Last button with SVG and no text
+                for (let b = btnCount - 1; b >= 0; b--) {
+                    const btn = buttons.nth(b);
+                    const txt = await btn.innerText();
+                    const h = await btn.innerHTML();
+
+                    if (txt.trim() === '' && h.includes('<svg')) {
+                        menuBtn = btn;
+                        break;
+                    }
+                }
+            }
+
+            if (menuBtn) {
+                // console.error('  Invoking menu click...');
+                const success = await this.downloadSongViaMenu(menuBtn, songsDownloaded, downloadDir);
+                if (success) {
+                    // console.error('  ✅ Success!');
+                    songsDownloaded++;
+                    await this.page.waitForTimeout(1000);
+                } else {
+                    // console.error('  ❌ Failed to download via menu.');
+                }
+            } else {
+                // console.error('  ⚠️ Could not find menu button for this song (checked ' + btnCount + ' buttons).');
             }
         }
 
-        console.log('Create clicked. Waiting for generation to start...');
+        // console.error(`Process Complete. Downloaded ${songsDownloaded} songs.`);
+    }
 
-        // Wait for the new item to appear
-        console.log('Waiting for new song to register...');
-        await this.page.waitForTimeout(10000); // Wait for potential list refresh
-
+    async downloadSongViaMenu(triggerLocator, index, downloadDir) {
         try {
-            // Broad selector for the most recent song item (assuming top of list)
-            // We look for a "Play" button which indicates a playable track, or "Generating" text.
+            if (!await triggerLocator.isVisible()) return false;
 
-            // NEW STRATEGY: Network Response Interception
-            // Instead of fighting the UI menus, we will listen for the audio file being fetched by the browser.
-            // When we click "Play", the browser requests the MP3/WAV from the CDN. We catch that.
+            // 1. Click the Menu button
+            // // console.error('  Clicking menu...');
+            await triggerLocator.click();
 
-            console.log('Monitoring network traffic for audio');
+            // 2. Wait for Menu Content "Download"
+            // It might be in a portal (at root body), so we search globally
+            const downloadOption = this.page.getByRole('menuitem', { name: 'Download' }).or(this.page.getByText('Download', { exact: true }));
 
-            let downloadPromiseResolve;
-            const downloadPromise = new Promise(resolve => downloadPromiseResolve = resolve);
+            try {
+                await downloadOption.first().waitFor({ state: 'visible', timeout: 3000 });
+            } catch (e) {
+                // Not a menu or wrong button?
+                // // console.error('  ❌ Download option not found. Closing menu.');
+                await this.page.locator('body').click({ position: { x: 0, y: 0 } }); // Close
+                return false;
+            }
 
-            // Set up listener for MP3/WAV responses
-            const responseHandler = async (response) => {
-                const url = response.url();
-                const headers = response.headers();
-                const contentType = headers['content-type'] || '';
+            // 3. Click Download
+            await downloadOption.first().click();
 
-                // Debug log to see what's happening
-                // if (url.includes('.mp3') || contentType.includes('audio')) console.log(`Traffic: ${url} [${contentType}]`);
+            // 4. Look for "MP3 Audio" or generic "Audio"
+            const mp3Option = this.page.getByText('MP3 Audio').last();
+            const genericAudio = this.page.getByText('Audio').filter({ hasNotText: 'Video' }).last();
 
-                // Check if it's an audio file from Suno's CDN
-                // We accept .mp3 extension OR audio/mpeg content type
-                // We exclude silence and tiny chunks if possible
-                if ((url.includes('.mp3') || contentType.includes('audio/mpeg') || contentType.includes('audio/wav')) && !url.includes('sil-100')) {
-                    console.log(`\nIntercepted candidate audio URL: ${url}`);
-                    downloadPromiseResolve(url); // Just resolve with URL, don't read body yet
-                }
-            };
+            let finalOption = null;
+            if (await mp3Option.isVisible()) finalOption = mp3Option;
+            else if (await genericAudio.isVisible()) finalOption = genericAudio;
 
-            this.page.on('response', responseHandler);
+            if (finalOption) {
+                // Setup download wait
+                const downloadPromise = this.page.waitForEvent('download', { timeout: 15000 }).catch(() => null);
 
-            // Trigger Loop: Click Play periodically to force the request
-            const startTime = Date.now();
-            const timeout = 300000; // 5 mins
+                await finalOption.click();
 
-            let capturedUrl = null;
-            let title = 'generated_song'; // Define title here for scope
-
-            while (Date.now() - startTime < timeout) {
-                // Check if our promise resolved (we found a file)
-                const raceResult = await Promise.race([
-                    downloadPromise,
-                    new Promise(r => setTimeout(r, 2000)) // 2s tick
-                ]);
-
-                if (raceResult && typeof raceResult === 'string') {
-                    capturedUrl = raceResult;
-                    break;
-                }
-
-                // If not found yet, try clicking Play on the first item
+                // 5. Handle potential "Commercial Rights" popup
+                // Look for "Download Anyway" button
+                const popupBtn = this.page.getByRole('button', { name: 'Download Anyway' });
                 try {
-                    // Try generic play button or specific ones
-                    // Suno often has a big play button or list play buttons.
-                    const firstPlayBtn = this.page.locator('button[aria-label="Play"], button[title="Play"], [data-testid="play-button"]').first();
-                    if (await firstPlayBtn.isVisible()) {
-                        await firstPlayBtn.click({ timeout: 1000 }).catch(() => { });
+                    await popupBtn.waitFor({ state: 'visible', timeout: 2000 });
+                    if (await popupBtn.isVisible()) {
+                        // console.error('  ⚠️ Handling Commercial Rights popup...');
+                        await popupBtn.click();
                     }
                 } catch (e) { }
 
-                // Feedback
-                const generatingLabel = this.page.getByText('Generating...', { exact: false }).first();
-                if (await generatingLabel.isVisible()) {
-                    if ((Date.now() - startTime) % 10000 < 2000) console.log('Song is still generating...');
+                // 6. Wait for file
+                const download = await downloadPromise;
+                if (download) {
+                    const suggestName = download.suggestedFilename();
+                    const cleanName = suggestName.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+                    const savePath = path.join(downloadDir, cleanName);
+
+                    await download.saveAs(savePath);
+                    // console.error(`  ✅ Downloaded: ${cleanName}`);
+
+                    // Cleanup: Close menu if stuck open (clicking body)
+                    await this.page.locator('body').click({ position: { x: 0, y: 0 } });
+                    return savePath; // Return the PATH
                 } else {
-                    if ((Date.now() - startTime) % 5000 < 1000) process.stdout.write('.');
+                    // console.error('  ❌ Download timed out.');
                 }
-
-                await this.page.waitForTimeout(1000);
-            }
-
-            // cleanup listener
-            this.page.removeListener('response', responseHandler);
-
-            if (capturedUrl) {
-                console.log(`\nDownloading captured URL: ${capturedUrl}...`);
-
-                const downloadDir = path.join(process.cwd(), 'downloads');
-                if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir);
-
-                title = prompt.slice(0, 20).replace(/[^a-z0-9]/gi, '_').toLowerCase();
-                const fileName = `${title}_${Date.now()}.mp3`;
-                const filePath = path.join(downloadDir, fileName);
-
-                // Perform separate download request
-                const response = await this.context.request.get(capturedUrl);
-                const buffer = await response.body();
-
-                fs.writeFileSync(filePath, buffer);
-                console.log(`Audio saved to: ${filePath}`);
-
-                return {
-                    timestamp: new Date().toISOString(),
-                    prompt: prompt,
-                    status: 'Completed',
-                    file: filePath
-                };
             } else {
-                console.log('\nTimed out waiting for audio network request.');
-                return {
-                    timestamp: new Date().toISOString(),
-                    prompt: prompt,
-                    status: 'Timeout waiting for audio network request'
-                };
+                // console.error('  ❌ MP3/Audio option not found in submenu.');
             }
+
+            // Cleanup
+            await this.page.locator('body').click({ position: { x: 0, y: 0 } });
+            return null;
 
         } catch (e) {
-            console.warn('Error during download process:', e.message);
-            return {
-                timestamp: new Date().toISOString(),
-                prompt: prompt,
-                status: 'Error: ' + e.message
-            };
+            // console.error(`  ❌ Error on item ${index}: ${e.message}`);
+            await this.page.locator('body').click({ position: { x: 0, y: 0 } });
+            return null;
         }
     }
+
     async close() {
         if (this.browser) {
-            await this.context.storageState({ path: this.storageStatePath }); // Save state one last time
+            await this.context.storageState({ path: this.storageStatePath });
             await this.browser.close();
         }
     }
