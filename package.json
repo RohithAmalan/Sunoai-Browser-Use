@@ -4,14 +4,16 @@
   "description": "Browser automation for Suno AI song generation",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "start-server": "node server.js",
-    "suno:cdp-run": "node index.js"
+    "start": "node src/scripts/manual_bot.js",
+    "start-server": "node src/api/server.js",
+    "mcp": "node src/mcp/server.js",
+    "suno:cdp-run": "node src/scripts/manual_bot.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.24.3",
     "body-parser": "^2.2.1",
     "cors": "^2.8.5",
+    "eventsource": "^4.1.0",
     "express": "^5.2.1",
     "playwright": "^1.40.0",
     "zod": "^4.1.13"

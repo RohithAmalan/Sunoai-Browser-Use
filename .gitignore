@@ -1,7 +1,6 @@
-node_modules
-auth.json*
-*.mp3
-generated_songs.json
+node_modules/
 .DS_Store
-
-downloads/
+.env
+data/
+*.log
+/tmp/
