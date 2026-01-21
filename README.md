@@ -63,3 +63,6 @@ Type `y` to run it invisibly.
 
 ## Disclaimer
 This is an unofficial automation script. Use responsibly and in accordance with Suno AI's terms of service.
+
+
+jusst for update
